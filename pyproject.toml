@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-batch-runner"
+version = "0.1.0"
+description = "Code-orchestrated campaign runner for LLM agent fan-out: declarative specs, parallel claude -p calls, rubric verification, and cost metering."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Joe Petrucelli", email = "joepetjr@gmail.com" }]
+requires-python = ">=3.11"
+keywords = ["llm", "agents", "orchestration", "fan-out", "claude", "batch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# Runtime deps: the Python standard library only. The one external requirement
+# is the `claude` CLI on PATH, which pip cannot install for you.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+claude-batch-runner = "claude_batch_runner.__main__:main"
+
+[tool.setuptools]
+packages = ["claude_batch_runner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

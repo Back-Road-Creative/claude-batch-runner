@@ -1,0 +1,10 @@
+{
+  "worklist": "demo-worklist.jsonl",
+  "worker": {"agent": "doc-reviewer", "tier": "sonnet", "effort": "low"},
+  "parallelism": 2,
+  "escalate": {"condition": "confidence < 0.6", "advisor": {"agent": "batch-advisor", "tier": "opus"}},
+  "schema": {"type": "object", "properties": {"finding": {"type": "string"}, "confidence": {"type": "number"}}, "required": ["finding", "confidence"]},
+  "verify": {"rubric": "rubrics/finding-validity.md", "agent": "batch-verifier"},
+  "deliver": "report-only",
+  "report": "reports/{date}-demo-campaign.md"
+}
