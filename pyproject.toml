@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-batch-runner"
-version = "0.1.0"
+version = "0.1.1"
 description = "Code-orchestrated campaign runner for LLM agent fan-out: declarative specs, parallel claude -p calls, rubric verification, and cost metering."
 readme = "README.md"
 license = { text = "MIT" }
