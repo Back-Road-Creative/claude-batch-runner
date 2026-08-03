@@ -4,16 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.1 - 2026-08-03
+## Unreleased
 
 ### Added
-
-- Windows installer, built and attached to a `v*` tag's GitHub release by
-  `.github/workflows/release.yml`: a PyInstaller one-file executable wrapped in
-  an Inno Setup installer (`installer/`) that installs into Program Files, adds
-  itself to `PATH`, and registers an uninstaller. It does not bundle the Claude
-  Code CLI and it is not code-signed; both are stated in the installer and the
-  README.
 
 - **`cwd` and `permission_mode` on `call_agent`** — two optional keyword-only
   arguments. `cwd` runs the `claude` subprocess in that directory, validated to
@@ -35,6 +28,17 @@ Both arguments default to `None`, and when omitted nothing changes: no
 `--permission-mode` in the argv, no `cwd=` keyword on the `subprocess.run` call
 at all, and injected `call=` functions written against the four-positional
 signature are invoked exactly as before.
+
+## 0.1.1 - 2026-08-03
+
+### Added
+
+- Windows installer, built and attached to a `v*` tag's GitHub release by
+  `.github/workflows/release.yml`: a PyInstaller one-file executable wrapped in
+  an Inno Setup installer (`installer/`) that installs into Program Files, adds
+  itself to `PATH`, and registers an uninstaller. It does not bundle the Claude
+  Code CLI and it is not code-signed; both are stated in the installer and the
+  README.
 
 ## 0.1.0
 
