@@ -43,14 +43,27 @@ def report_path(campaign: Campaign, name: str) -> Path:
     return Path(campaign.report.format(date=datetime.date.today().isoformat(), campaign=name))
 
 
-def run(campaign: Campaign, name: str, *, call: Any = None) -> CampaignResult:
-    """Execute `campaign` per its deliver adapter; `name` keys the report path."""
+def run(
+    campaign: Campaign,
+    name: str,
+    *,
+    call: Any = None,
+    cwd: str | Path | None = None,
+    permission_mode: str | None = None,
+) -> CampaignResult:
+    """Execute `campaign` per its deliver adapter; `name` keys the report path.
+
+    `cwd` and `permission_mode` (see `driver.call_agent`) confine every call the
+    campaign makes — worker, advisor, and grader alike, so an escalation cannot
+    step outside the sandbox its worker ran in. Omitted, the run is unchanged.
+    """
     if campaign.deliver == "pr-dispatch":
         raise NotImplementedError(PR_DISPATCH_CONTRACT)
-    return _report_only(campaign, name, call or driver.call_agent)
+    opts = driver.agent_options(cwd, permission_mode)
+    return _report_only(campaign, name, call or driver.call_agent, opts)
 
 
-def _report_only(campaign: Campaign, name: str, call: Any) -> CampaignResult:
+def _report_only(campaign: Campaign, name: str, call: Any, opts: dict[str, Any]) -> CampaignResult:
     start, cond = time.monotonic(), None
     if campaign.escalate:  # upstream gate: a bad condition fails before any tokens burn
         raw = campaign.escalate.condition
@@ -71,16 +84,18 @@ def _report_only(campaign: Campaign, name: str, call: Any) -> CampaignResult:
         )
         for i, u in enumerate(campaign.units, 1)
     }
-    envelopes = driver.fan_out(tasks, call=call, max_workers=campaign.parallelism)
+    envelopes = driver.fan_out(tasks, call=call, max_workers=campaign.parallelism, **opts)
     units = tuple(
-        _finish_unit(key, u, tasks[key], envelopes[key], campaign, cond, rubric, meter, tiers, call)
+        _finish_unit(
+            key, u, tasks[key], envelopes[key], campaign, cond, rubric, meter, tiers, call, opts
+        )
         for key, u in zip(tasks, campaign.units)
     )
     duration = time.monotonic() - start
     return CampaignResult(units, _write_report(campaign, name, units, meter, duration), duration)
 
 
-def _finish_unit(key, unit, task, envelope, campaign, cond, rubric, meter, tiers, call):
+def _finish_unit(key, unit, task, envelope, campaign, cond, rubric, meter, tiers, call, opts):
     label = (unit if isinstance(unit, str) else json.dumps(unit)).replace("|", "\\|")[:48]
     acc = {"tokens": 0, "metered": False}
 
@@ -99,7 +114,7 @@ def _finish_unit(key, unit, task, envelope, campaign, cond, rubric, meter, tiers
         return UnitReport(key, label, outcome, verdict, revisions, toks, note)
 
     def metered(agent, prompt, schema, budget):  # verify-pass calls: grader + worker revisions
-        env = call(agent, prompt, schema, budget)
+        env = call(agent, prompt, schema, budget, **opts)
         tally(tiers.get(agent, "?"), env)
         return env
 
@@ -116,7 +131,7 @@ def _finish_unit(key, unit, task, envelope, campaign, cond, rubric, meter, tiers
             f"{condition!r}. Produce the authoritative output.\n" + frame("WORKER DRAFT", draft)
         )
         try:
-            adv_env = call(advisor.agent, prompt, campaign.schema, UNIT_BUDGET_USD)
+            adv_env = call(advisor.agent, prompt, campaign.schema, UNIT_BUDGET_USD, **opts)
         except driver.AgentError as e:
             return done(FLAGGED, "-", 0, f"advisor error: {e}")
         tally(advisor.tier, adv_env)
