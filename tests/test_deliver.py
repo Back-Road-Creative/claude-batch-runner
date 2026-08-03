@@ -71,3 +71,23 @@ def test_pr_dispatch_stub_and_condition_gate(tmp_path):
     bad = {"escalate": {"condition": "vibes are off", "advisor": {"agent": "adv"}}}
     with pytest.raises(bspec.SpecError, match="escalate.condition"):
         deliver.run(_campaign(tmp_path, ["u"], bad), "d", call=lambda *a: pytest.fail("no call"))
+
+
+def test_run_confines_worker_advisor_and_grader_alike(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen: list = []
+
+    def confined(agent, prompt, schema, budget, **opts):
+        seen.append((agent, opts))
+        return fake_call(agent, prompt, schema, budget)
+
+    c = _campaign(tmp_path, ["beta"], FULL)  # beta escalates: worker -> advisor -> grader
+    deliver.run(c, "demo", call=confined, cwd=tmp_path, permission_mode="plan")
+    assert {agent for agent, _ in seen} == {"w", "adv", "v"}
+    assert all(opts == {"cwd": tmp_path, "permission_mode": "plan"} for _, opts in seen)
+
+
+def test_run_without_options_keeps_the_four_argument_call_contract(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _campaign(tmp_path, ["beta"], FULL)  # fake_call accepts exactly four positionals
+    assert [u.outcome for u in deliver.run(c, "demo", call=fake_call).units] == ["escalated"]

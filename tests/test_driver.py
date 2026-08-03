@@ -31,6 +31,18 @@ def _task(agent: str = "health-gaps", budget: float = 5.0) -> driver.AgentTask:
     return driver.AgentTask(agent=agent, prompt="p", schema=SCHEMA, budget_usd=budget)
 
 
+def _capture_run(monkeypatch) -> dict:
+    """Stub subprocess.run with a success envelope; return where cmd/kwargs land."""
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"], captured["kwargs"] = cmd, kwargs
+        return _proc(stdout=json.dumps(_envelope({})))
+
+    monkeypatch.setattr(driver.subprocess, "run", fake_run)
+    return captured
+
+
 # --- call_agent ---------------------------------------------------------------
 
 
@@ -96,6 +108,49 @@ def test_call_agent_non_json_stdout_raises(monkeypatch):
         driver.call_agent("health-gaps", "p", SCHEMA, 5.0)
 
 
+# --- call_agent: cwd + permission_mode ----------------------------------------
+
+
+def test_call_agent_omitting_options_leaves_the_call_unchanged(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    driver.call_agent("health-gaps", "analyze", SCHEMA, 5.0)
+    assert "--permission-mode" not in captured["cmd"]
+    assert "cwd" not in captured["kwargs"]  # not even cwd=None — today's call, byte for byte
+
+
+def test_call_agent_cwd_reaches_the_subprocess(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    driver.call_agent("health-gaps", "analyze", SCHEMA, 5.0, cwd=tmp_path)
+    assert captured["kwargs"]["cwd"] == tmp_path
+
+
+def test_call_agent_bad_cwd_raises_before_any_dispatch(monkeypatch, tmp_path):
+    def never(*a, **k):
+        raise AssertionError("no subprocess may start for an unusable cwd")
+
+    monkeypatch.setattr(driver.subprocess, "run", never)
+    (not_a_dir := tmp_path / "f.txt").write_text("x")
+    for bad in (tmp_path / "nope", not_a_dir):
+        with pytest.raises(driver.AgentError, match=r"cwd is not an existing directory"):
+            driver.call_agent("health-gaps", "p", SCHEMA, 5.0, cwd=bad)
+
+
+def test_call_agent_permission_mode_appears_in_argv(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    driver.call_agent("health-gaps", "p", SCHEMA, 5.0, permission_mode="acceptEdits")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--permission-mode") + 1] == "acceptEdits"
+    assert "cwd" not in captured["kwargs"]
+
+
+def test_call_agent_both_options_together(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    driver.call_agent("health-gaps", "p", None, 5.0, cwd=tmp_path, permission_mode="plan")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--permission-mode") + 1] == "plan"
+    assert captured["kwargs"]["cwd"] == tmp_path
+
+
 # --- agent_failure_detail -----------------------------------------------------
 
 
@@ -155,6 +210,18 @@ def test_fan_out_non_agent_error_propagates():
 
     with pytest.raises(ValueError, match="driver bug"):
         driver.fan_out({"x": _task()}, call=broken)
+
+
+def test_fan_out_forwards_options_and_passes_none_when_unset(tmp_path):
+    seen: list = []
+
+    def fake_call(agent, prompt, schema, budget, **opts):
+        seen.append(opts)
+        return _envelope({})
+
+    driver.fan_out({"a": _task()}, call=fake_call)
+    driver.fan_out({"a": _task()}, call=fake_call, cwd=tmp_path, permission_mode="plan")
+    assert seen == [{}, {"cwd": tmp_path, "permission_mode": "plan"}]
 
 
 def test_fan_out_max_workers_caps_concurrency():

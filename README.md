@@ -271,6 +271,36 @@ in the results rather than in a count you forgot to check.
 estimate crosses it. Set it as a runaway-loop stop, generously — tuning it down
 just moves the abort onto whichever unit reads the most.
 
+### Confining a run to a directory
+
+`call_agent` takes two optional keyword arguments for running agents somewhere
+other than the caller's own directory, on tighter permissions:
+
+```python
+from claude_batch_runner import call_agent
+
+envelope = call_agent("doc-reviewer", prompt, schema, 5.0,
+                      cwd="/tmp/eval-fixture",   # the subprocess's working directory
+                      permission_mode="plan")    # claude --permission-mode
+```
+
+`cwd` must be an existing directory. A missing one raises `AgentError` *before*
+the subprocess starts, so a bad path inside a fan-out comes back as that unit's
+`{"_error": ...}` row rather than taking the batch down. `permission_mode` is
+handed straight to the CLI — the accepted modes are its vocabulary, not the
+runner's, so a mode the CLI adds later works without a release here.
+
+Both are accepted by `fan_out(tasks, cwd=..., permission_mode=...)`, which
+applies them to every task, and by `deliver.run(campaign, name, cwd=...,
+permission_mode=...)`, which applies them to every call a campaign makes —
+worker, advisor, and grader alike, so an escalation cannot step outside the
+sandbox its worker ran in.
+
+Both default to `None`, and omitting them changes nothing: no
+`--permission-mode` in the argv, no `cwd` on the subprocess call, and an
+injected `call=` written against the four-argument signature is invoked exactly
+as before.
+
 ## Examples
 
 - [`examples/demo-campaign.json`](examples/) — the campaign above, runnable

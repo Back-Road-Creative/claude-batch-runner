@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`cwd` and `permission_mode` on `call_agent`** — two optional keyword-only
+  arguments. `cwd` runs the `claude` subprocess in that directory, validated to
+  exist first so an unusable path raises `AgentError` before a process starts
+  (inside `fan_out` that surfaces as the unit's `_error` row instead of taking
+  the batch down). `permission_mode` is passed to `claude --permission-mode`;
+  the accepted modes stay the CLI's vocabulary, not the runner's. This is what
+  a replay harness needs to run recorded, action-shaped prompts against a
+  throwaway fixture directory under a restrictive mode.
+- **Both threaded through `fan_out` and `deliver.run`** with the same optional
+  contract — a campaign confines its worker, advisor, *and* grader calls alike,
+  so an escalation cannot step outside the sandbox its worker ran in.
+- **`agent_options`** — builds the optional `call_agent` kwargs and omits
+  whatever is unset, which is what keeps the no-argument path byte-identical.
+
+### Compatibility
+
+Both arguments default to `None`, and when omitted nothing changes: no
+`--permission-mode` in the argv, no `cwd=` keyword on the `subprocess.run` call
+at all, and injected `call=` functions written against the four-positional
+signature are invoked exactly as before.
+
 ## 0.1.1 - 2026-08-03
 
 ### Added

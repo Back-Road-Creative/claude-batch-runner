@@ -14,6 +14,7 @@ Import surface:
   AgentTask             one unit of fan-out work
   call_agent            single `claude -p --agent` subprocess call
   fan_out               parallel fan-out over {key: AgentTask}
+  agent_options         the optional call_agent kwargs, minus whatever is unset
   AgentError            raised on any non-success or malformed result
   agent_failure_detail  envelope-aware failure description
 """
@@ -25,6 +26,7 @@ import dataclasses
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import Any
 
 DEFAULT_AGENT_TIMEOUT_S = int(os.environ.get("AGENT_TIMEOUT_S", "600"))
@@ -71,17 +73,41 @@ def agent_failure_detail(proc: subprocess.CompletedProcess[str]) -> str | None:
     return f"exit {proc.returncode}, " + (", ".join(bits) or "is_error=True")[:600]
 
 
+def agent_options(
+    cwd: str | Path | None = None, permission_mode: str | None = None
+) -> dict[str, Any]:
+    """The optional `call_agent` keyword arguments, minus whatever is unset.
+
+    Empty when both are None, so a caller's own injected `call=` written against
+    the four-positional-argument signature keeps working untouched.
+    """
+    given = (("cwd", cwd), ("permission_mode", permission_mode))
+    return {k: v for k, v in given if v is not None}
+
+
 def call_agent(
     agent_name: str,
     prompt: str,
     schema: dict[str, Any] | None,
     budget_usd: float,
+    *,
+    cwd: str | Path | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Subprocess `claude -p --agent <name>` and return the result envelope.
 
     When `schema` is provided, output is coerced into envelope["structured_output"].
     Raises AgentError on any non-success result or parse failure.
+
+    `cwd` runs the subprocess in that directory — checked to exist first, so an
+    unusable path raises before a process starts (and inside `fan_out` becomes
+    that unit's `_error` row rather than taking the batch down). `permission_mode`
+    is handed straight to `claude --permission-mode`; the accepted modes are the
+    CLI's vocabulary, not the runner's. Both default to None, and when omitted
+    the subprocess call is exactly what it was without them.
     """
+    if cwd is not None and not Path(cwd).is_dir():
+        raise AgentError(f"agent {agent_name}: cwd is not an existing directory: {cwd}")
     cmd = [
         "claude",
         "-p",
@@ -96,8 +122,13 @@ def call_agent(
     ]
     if schema is not None:
         cmd += ["--json-schema", json.dumps(schema)]
+    if permission_mode is not None:
+        cmd += ["--permission-mode", permission_mode]
+    where = {"cwd": cwd} if cwd is not None else {}  # unset: not even cwd=None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=DEFAULT_AGENT_TIMEOUT_S)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=DEFAULT_AGENT_TIMEOUT_S, **where
+        )
     except subprocess.TimeoutExpired as e:
         raise AgentError(
             f"agent {agent_name} timed out after {DEFAULT_AGENT_TIMEOUT_S}s: {e}"
@@ -117,6 +148,8 @@ def fan_out(
     *,
     call: Any = call_agent,
     max_workers: int | None = None,
+    cwd: str | Path | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Parallel subprocess fan-out over independent agent tasks.
 
@@ -124,13 +157,17 @@ def fan_out(
     envelope carrying {"_error": "<msg>"} so the orchestrator can surface
     coverage gaps without aborting the run.  `max_workers` defaults to
     len(tasks) — full-width fan-out; pass it to cap concurrency.
+
+    `cwd` and `permission_mode` apply to every task (see `call_agent`); omit
+    them and `call` is invoked with the same four positional arguments as before.
     """
     if not tasks:
         return {}
+    opts = agent_options(cwd, permission_mode)
     results: dict[str, dict[str, Any]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers or len(tasks)) as pool:
         futures = {
-            pool.submit(call, task.agent, task.prompt, task.schema, task.budget_usd): key
+            pool.submit(call, task.agent, task.prompt, task.schema, task.budget_usd, **opts): key
             for key, task in tasks.items()
         }
         for fut in concurrent.futures.as_completed(futures):
