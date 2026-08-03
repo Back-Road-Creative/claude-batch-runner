@@ -51,6 +51,42 @@ claude --version   # if this fails, the runner will too
 
 Python 3.11 or newer.
 
+### Windows installer
+
+Each release also carries `claude-batch-runner-setup-<version>.exe` on its
+[releases page](https://github.com/Back-Road-Creative/claude-batch-runner/releases)
+— the runner frozen into one executable, so it needs no Python. It installs
+into Program Files, appends that directory to the system `PATH`, and registers
+an uninstaller in Add/Remove Programs. Open a *new* terminal afterwards; one
+that was already open still holds the old `PATH`.
+
+Two things to know before downloading it.
+
+**Claude Code is not bundled, and the runner cannot do anything without it.**
+Every unit of work is a `claude -p` subprocess, so with no `claude` on `PATH`
+each unit comes back `FLAGGED` with an error and the campaign accomplishes
+nothing. Claude Code is separately versioned and self-updating, so it installs
+itself:
+
+```powershell
+winget install Anthropic.ClaudeCode
+```
+
+The [native installer](https://code.claude.com/docs/en/setup) —
+`irm https://claude.ai/install.ps1 | iex` — works too and auto-updates. Confirm
+with `claude --version`, then run `claude` once and follow the browser prompts
+to sign in. The runner never reads, sets, or forwards credentials of its own;
+it inherits whatever that login leaves configured.
+
+**The build is not code-signed.** There is no code-signing certificate for this
+project, so Windows cannot show you a publisher. Expect the blue *"Windows
+protected your PC"* box — "Microsoft Defender SmartScreen prevented an
+unrecognized app from starting" — which runs the installer only after **More
+info** → **Run anyway**, and expect your browser to warn during the download.
+That is simply what an unsigned binary looks like; it is not evidence the file
+is safe. If you would rather not make that call, `pip install .` from a
+checkout needs no installer.
+
 ## Quick start
 
 A campaign is one JSON file. This one reviews three documentation files:
