@@ -15,6 +15,7 @@ from claude_batch_runner.driver import (
     AgentError,
     AgentTask,
     agent_failure_detail,
+    agent_options,
     call_agent,
     fan_out,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "VerifyError",
     "Worker",
     "agent_failure_detail",
+    "agent_options",
     "call_agent",
     "fan_out",
     "load_campaign",
@@ -50,4 +52,4 @@ __all__ = [
     "verify_unit",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
