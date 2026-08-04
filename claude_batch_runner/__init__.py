@@ -10,6 +10,9 @@ Four pieces, each usable on its own:
 Public API is re-exported here.
 """
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _installed_version
+
 from claude_batch_runner.driver import (
     DEFAULT_AGENT_TIMEOUT_S,
     AgentError,
@@ -52,4 +55,10 @@ __all__ = [
     "verify_unit",
 ]
 
-__version__ = "0.1.0"
+# Derived, never written by hand. `pyproject.toml` is the single source of
+# truth — release.yml already cross-checks it against the git tag — and a
+# second literal here drifted the moment 0.1.1 bumped one and not the other.
+try:
+    __version__ = _installed_version("claude-batch-runner")
+except PackageNotFoundError:  # source checkout, never pip-installed
+    __version__ = "0.0.0.dev0"
