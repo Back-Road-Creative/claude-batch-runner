@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- **`__version__` reported `0.1.0` for the whole of `0.1.1`.** The release
+  bumped the literal in `pyproject.toml` and left the second one in
+  `claude_batch_runner/__init__.py` behind, so anything reading the package
+  attribute saw the previous release. `__version__` is now *derived* from
+  installed metadata, leaving `pyproject.toml` as the single source of truth
+  (which is what `release.yml` already cross-checks against the git tag), and
+  `tests/test_version.py` fails if the two ever disagree again. A source
+  checkout that was never pip-installed reports `0.0.0.dev0`.
+
 ### Added
 
 - **`cwd` and `permission_mode` on `call_agent`** — two optional keyword-only
