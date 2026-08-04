@@ -7,6 +7,9 @@
 ;   ISCC.exe /DAppVersion=0.1.0 installer\claude-batch-runner.iss
 ;
 ; See .github/workflows/release.yml for the whole sequence.
+;
+; Keep this file pure ASCII. Inno reads a BOM-less script as ANSI, so an em
+; dash or a curly quote pasted in from prose becomes mojibake in the wizard.
 
 #define AppName "claude-batch-runner"
 #define AppURL "https://github.com/Back-Road-Creative/claude-batch-runner"
