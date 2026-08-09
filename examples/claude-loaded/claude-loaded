@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+# claude-loaded — inspect what's loaded into the current Claude Code session's context.
+#
+# Lists every file injected into the active session (CLAUDE.md files, auto-memory files,
+# files Read by tools during the session), with per-file token estimates, color-coded
+# size, and steady-state cost per turn. Useful for spotting context bloat.
+#
+# Usage:
+#   claude-loaded                    # current session (resolved via PPID)
+#   claude-loaded --all              # list running Claude Code sessions
+#   claude-loaded --session <id>     # specific session by id prefix
+#   claude-loaded --transcript <p>   # specific transcript path
+#   claude-loaded --prune            # flag stale auto-memory files for cleanup
+#   claude-loaded --budget [CHARS]   # warn when the always-loaded static set (chain
+#                                    # CLAUDE.md + auto-memory index) exceeds CHARS
+#                                    # (default 38000); silent + exit 0 when under,
+#                                    # prints offenders + exit 1 when over
+#   claude-loaded --cwd <dir>        # cwd for --budget (default: $PWD); no session needed
+#   claude-loaded --no-color         # plain output
+#   claude-loaded --json             # machine-readable
+#   claude-loaded --help
+#
+# Environment:
+#   CLAUDE_HOME       Override ~/.claude (default: $HOME/.claude)
+#   CLAUDE_CTX_MAX    Force the context-window size (default: derived from the model)
+#   STALE_DAYS        Prune threshold: file unmodified for N days (default 60)
+#   RECENT_DAYS       Prune threshold: filename unseen in transcripts for N days (default 30)
+#   COST_RATE_USD_M   Per-1M-token cost for cache reads (default 1.50, Opus-class)
+
+set -uo pipefail
+trap '' PIPE
+
+CLAUDE_HOME=${CLAUDE_HOME:-$HOME/.claude}
+PROJECTS_DIR="$CLAUDE_HOME/projects"
+SESSIONS_DIR="$CLAUDE_HOME/sessions"
+
+GREEN_MAX=2000
+YELLOW_MAX=10000
+RATE=${COST_RATE_USD_M:-1.50}
+
+USE_COLOR=1
+OUTPUT_JSON=0
+FORCE_TRANSCRIPT=""
+FORCE_SESSION=""
+
+die() { echo "claude-loaded: $*" >&2; exit 1; }
+
+c() {
+  [ "$USE_COLOR" = 0 ] && { printf "%s" "$2"; return; }
+  case "$1" in
+    green)  printf "\033[32m%s\033[0m" "$2" ;;
+    yellow) printf "\033[33m%s\033[0m" "$2" ;;
+    red)    printf "\033[31m%s\033[0m" "$2" ;;
+    dim)    printf "\033[2m%s\033[0m" "$2" ;;
+    bold)   printf "\033[1m%s\033[0m" "$2" ;;
+    cyan)   printf "\033[36m%s\033[0m" "$2" ;;
+    *)      printf "%s" "$2" ;;
+  esac
+}
+
+tok_color() {
+  local n=$1
+  if   [ "$n" -lt "$GREEN_MAX" ];  then echo green
+  elif [ "$n" -lt "$YELLOW_MAX" ]; then echo yellow
+  else echo red
+  fi
+}
+
+fmt_tok() {
+  local n=$1
+  if   [ "$n" -ge 1000000 ]; then awk "BEGIN{printf \"%.1fM\", $n/1000000}"
+  elif [ "$n" -ge 1000    ]; then awk "BEGIN{printf \"%.1fK\", $n/1000}"
+  else printf "%d" "$n"
+  fi
+}
+
+fmt_cost() { awk "BEGIN{printf \"\$%.4f\", $1 * $RATE / 1000000}"; }
+
+# Claude tokenizer ≈ 3.6 chars/token for English+code
+chars_to_tokens() { echo $(( ${1:-0} * 10 / 36 )); }
+
+# Encode a path to its Claude projects-dir name (replace / with -)
+# Claude Code project-dir encoding: replace / and _ with -
+encode_cwd() { echo "$1" | sed 's|[/_]|-|g'; }
+
+# Resolve the auto-memory project dir for a cwd.
+#
+# WHY the git toplevel and not the raw cwd: the harness keys a session's
+# auto-memory project to the cwd's git toplevel, so a session in <repo>/sub/dir
+# is injected <repo>'s MEMORY.md. Slugging the raw cwd pointed at a per-directory
+# project index that is never injected — usually a stale one, or none at all —
+# so the static-budget check silently measured the wrong file and understated the
+# real bundle. Not-in-a-repo cwds (e.g. $HOME) keep the raw-cwd slug.
+memory_project_dir() {
+  local cwd=$1 root
+  root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$root" ] || root=$cwd
+  echo "$PROJECTS_DIR/$(encode_cwd "$root")/memory"
+}
+
+# Find the transcript for a sessionId by globbing all project dirs
+find_transcript_by_sid() {
+  local sid=$1
+  [ -z "$sid" ] && return 1
+  for f in "$PROJECTS_DIR"/*/"$sid".jsonl; do
+    [ -f "$f" ] && { echo "$f"; return 0; }
+  done
+  # Prefix match
+  for f in "$PROJECTS_DIR"/*/"$sid"*.jsonl; do
+    [ -f "$f" ] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+
+# Walk up the process tree, find the Claude PID, map to session, locate transcript
+resolve_transcript_from_ppid() {
+  local pid=$PPID
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ "$pid" -le 1 ] && break
+    local sf="$SESSIONS_DIR/$pid.json"
+    if [ -f "$sf" ]; then
+      local sid t
+      sid=$(jq -r '.sessionId // empty' "$sf" 2>/dev/null)
+      t=$(find_transcript_by_sid "$sid")
+      [ -n "$t" ] && { echo "$t"; return 0; }
+    fi
+    [ -r "/proc/$pid/stat" ] || break
+    pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo 1)
+  done
+  return 1
+}
+
+list_sessions() {
+  printf "%-8s %-10s %-50s %s\n" "PID" "STARTED" "CWD" "SESSION-ID"
+  [ -d "$SESSIONS_DIR" ] || { echo "(no sessions dir at $SESSIONS_DIR)"; return; }
+  for sf in "$SESSIONS_DIR"/*.json; do
+    [ -f "$sf" ] || continue
+    local pid cwd started sid
+    pid=$(jq -r '.pid // empty' "$sf")
+    [ -d "/proc/$pid" ] || continue
+    cwd=$(jq -r '.cwd // empty' "$sf")
+    started=$(jq -r '.startedAt // empty' "$sf" | cut -dT -f2 | cut -d. -f1)
+    sid=$(jq -r '.sessionId // empty' "$sf")
+    printf "%-8s %-10s %-50s %s\n" "$pid" "$started" "${cwd:0:50}" "${sid:0:8}"
+  done
+}
+
+# --- prune subcommand --------------------------------------------------------
+
+prune_memory() {
+  local session_cwd=${1:-$HOME}
+  local mem_dir
+  mem_dir=$(memory_project_dir "$session_cwd")
+  local mem_index="$mem_dir/MEMORY.md"
+
+  if [ ! -f "$mem_index" ]; then
+    echo "No MEMORY.md found at $mem_index"
+    echo "(Auto-memory is per-project. Either no memory exists for this cwd, or"
+    echo " auto-memory is not enabled. Nothing to prune.)"
+    return 0
+  fi
+
+  local now=$(date +%s)
+  local stale_days=${STALE_DAYS:-60}
+  local recent_days=${RECENT_DAYS:-30}
+  local cutoff_recent=$((now - recent_days * 86400))
+
+  echo
+  c bold "Memory prune analysis"
+  echo
+  c dim "  Memory dir: $mem_dir"
+  echo
+  c dim "  Stale if not modified in ${stale_days}d AND filename not seen in any transcript in ${recent_days}d"
+  echo; echo
+
+  declare -A RECENT_HITS
+  while IFS= read -r t; do
+    [ -f "$t" ] || continue
+    local mtime
+    mtime=$(stat -c %Y "$t" 2>/dev/null || echo 0)
+    [ "$mtime" -lt "$cutoff_recent" ] && continue
+    while IFS= read -r name; do
+      RECENT_HITS[$name]=1
+    done < <(grep -oE '[a-zA-Z0-9_-]+\.md' "$t" 2>/dev/null | sort -u)
+  done < <(find "$PROJECTS_DIR" -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
+
+  printf "  %-7s %-10s %-10s  %s\n" "TOKENS" "MODIFIED" "RECENT?" "FILE"
+  printf "  %-7s %-10s %-10s  %s\n" "------" "--------" "-------" "----"
+
+  CANDIDATES=()
+  ROWS_OUT=()
+  # find, not overlapping globs: "*.md" + "archive/*.md" + "**/*.md" (no `shopt -s
+  # globstar` here, so bash treats "**" as a single "*") each matched the SAME
+  # archive/ files, so every archived candidate was counted — and listed — twice.
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(basename "$f")" = "MEMORY.md" ] && continue
+    local mtime age_days name chars tok hit_label color disp
+    mtime=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+    age_days=$(( (now - mtime) / 86400 ))
+    name=$(basename "$f")
+    chars=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+    tok=$(chars_to_tokens "$chars")
+    if [ -n "${RECENT_HITS[$name]:-}" ]; then
+      hit_label="yes"; color=green
+    else
+      hit_label="no"; color=red
+    fi
+    if [ "$age_days" -ge "$stale_days" ] && [ -z "${RECENT_HITS[$name]:-}" ]; then
+      CANDIDATES+=("$f")
+    fi
+    disp=${f/#$HOME/\~}
+    ROWS_OUT+=("$(printf '%08d|%s|%s|%s|%s' "$age_days" "$tok" "$color" "$hit_label" "$disp")")
+  done < <(find "$mem_dir" -type f -name '*.md' 2>/dev/null | sort -u)
+
+  if [ "${#ROWS_OUT[@]}" -eq 0 ]; then
+    echo "  (no detail memory files found)"
+    return 0
+  fi
+
+  IFS=$'\n' SORTED_ROWS=($(printf "%s\n" "${ROWS_OUT[@]}" | sort -r -u))
+  unset IFS
+  for row in "${SORTED_ROWS[@]}"; do
+    IFS='|' read -r age tok color hit disp <<<"$row"
+    age=$((10#$age))
+    printf "  "
+    c "$(tok_color $tok)" "$(printf '%-7s' "$(fmt_tok $tok)")"
+    printf " %-10s " "${age}d ago"
+    c "$color" "$(printf '%-10s' "$hit")"
+    printf "  %s\n" "$disp"
+  done
+
+  echo
+  if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+    c green "  No prune candidates — all memory files are either fresh or recently referenced."
+    echo
+  else
+    c bold "Prune candidates (${#CANDIDATES[@]}):"
+    echo
+    for f in "${CANDIDATES[@]}"; do
+      echo "  ${f/#$HOME/~}"
+    done
+    echo
+    c dim "  Review each manually. To remove a file:"
+    echo
+    echo "    rm <file>                # delete the memory file"
+    echo "    \$EDITOR $mem_index       # remove its index line"
+    echo
+    c dim "  Tune thresholds: STALE_DAYS=90 RECENT_DAYS=14 claude-loaded --prune"
+    echo
+  fi
+}
+
+# --- budget subcommand -------------------------------------------------------
+# Mirrors the harness's "CLAUDE.md over 40k-char limit" counter: the injected
+# bundle is every CLAUDE.md from / down to the cwd, the global CLAUDE.md, and
+# the cwd's auto-memory MEMORY.md index. Topic memory files are loaded on
+# demand (when Read) and do NOT count. Needs no transcript — usable from a
+# SessionStart hook. Verified against a live session's claudeMd system-reminder
+# contents; if the harness changes what it injects, update this list.
+
+budget_check() {
+  local cwd=$1 budget=$2
+  local -a files=()
+  [ -f "$CLAUDE_HOME/CLAUDE.md" ] && files+=("$CLAUDE_HOME/CLAUDE.md")
+  local dir=$cwd
+  while [ "$dir" != "/" ] && [ -n "$dir" ]; do
+    [ -f "$dir/CLAUDE.md" ] && files+=("$dir/CLAUDE.md")
+    dir=$(dirname "$dir")
+  done
+  local mem_dir
+  mem_dir=$(memory_project_dir "$cwd")
+  [ -f "$mem_dir/MEMORY.md" ] && files+=("$mem_dir/MEMORY.md")
+  local total=0 chars rows=()
+  local f
+  for f in "${files[@]:-}"; do
+    [ -z "$f" ] && continue
+    chars=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+    total=$((total + chars))
+    rows+=("$chars|$f")
+  done
+  [ "$total" -le "$budget" ] && return 0
+  echo "[static-budget] injected bundle is ${total} chars (budget ${budget}) for $cwd"
+  echo "[static-budget] contributors:"
+  printf "%s\n" "${rows[@]}" | sort -t'|' -k1,1 -rn | while IFS='|' read -r chars f; do
+    printf "  %6d  %s\n" "$chars" "${f/#$HOME/\~}"
+  done
+  echo "[static-budget] consolidate CLAUDE.md / the MEMORY.md index before the harness 40k warning fires. Run /loaded for the full breakdown."
+  return 1
+}
+
+# --- arg parsing -------------------------------------------------------------
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)        list_sessions; exit 0 ;;
+    --prune)      PRUNE=1 ;;
+    --budget)     BUDGET_MODE=1
+                  case "${2:-}" in [0-9]*) BUDGET_CHARS=$2; shift ;; esac ;;
+    --cwd)        FORCE_CWD=${2:-}; shift ;;
+    --help|-h)    sed -n '2,28p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    --no-color)   USE_COLOR=0 ;;
+    --json)       OUTPUT_JSON=1; USE_COLOR=0 ;;
+    --transcript) FORCE_TRANSCRIPT=${2:-}; shift ;;
+    --session)    FORCE_SESSION=${2:-}; shift ;;
+    *) die "unknown arg: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+# Budget mode needs no transcript — resolve cwd and exit on the check's status.
+if [ "${BUDGET_MODE:-0}" = 1 ]; then
+  budget_check "${FORCE_CWD:-$PWD}" "${BUDGET_CHARS:-38000}"
+  exit $?
+fi
+
+# Resolve transcript
+if [ -n "$FORCE_TRANSCRIPT" ]; then
+  TRANSCRIPT=$FORCE_TRANSCRIPT
+elif [ -n "$FORCE_SESSION" ]; then
+  TRANSCRIPT=$(find_transcript_by_sid "$FORCE_SESSION")
+else
+  TRANSCRIPT=$(resolve_transcript_from_ppid)
+fi
+
+if [ -z "${TRANSCRIPT:-}" ] || [ ! -f "$TRANSCRIPT" ]; then
+  echo "claude-loaded: couldn't resolve session." >&2
+  echo "" >&2
+  echo "If you're running this from inside a Claude Code session, your shell" >&2
+  echo "should be a descendant of the 'claude' process. From outside, pass" >&2
+  echo "--session <id> or --transcript <path>." >&2
+  echo "" >&2
+  list_sessions >&2
+  exit 2
+fi
+
+# Discover the session's cwd (for project CLAUDE.md walk and per-project memory)
+SESSION_CWD=$(jq -r 'select(.cwd) | .cwd' "$TRANSCRIPT" 2>/dev/null | tail -1)
+SESSION_CWD=${SESSION_CWD:-$HOME}
+
+if [ "${PRUNE:-0}" = 1 ]; then
+  prune_memory "$SESSION_CWD"
+  exit 0
+fi
+
+# Accurate total context tokens from last API call
+TOTAL=$(jq -r 'select(.message.usage) | .message.usage | (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)' "$TRANSCRIPT" 2>/dev/null | tail -1)
+TOTAL=${TOTAL:-0}
+
+# Context window is model-dependent, NOT a fixed constant: a "[1m]" alias (e.g.
+# "opus[1m]", "claude-fable-5[1m]") gets the 1M-token extended window; every other
+# model tops out at the standard 200K. Reading a 200K session's TOTAL against a
+# hardcoded 1M denominator understated its %-of-window by 5x. CLAUDE_CTX_MAX
+# forces an explicit value (e.g. for a model this heuristic doesn't recognize).
+if [ -n "${CLAUDE_CTX_MAX:-}" ]; then
+  CTX_MAX=$CLAUDE_CTX_MAX
+else
+  MODEL=$(jq -r '.model // empty' "$CLAUDE_HOME/settings.json" 2>/dev/null)
+  case "$MODEL" in
+    *\[1m\]*) CTX_MAX=1000000 ;;
+    *)        CTX_MAX=200000 ;;
+  esac
+fi
+
+# Build static-load list
+declare -a STATIC_FILES
+add_if_exists() { [ -f "$1" ] && STATIC_FILES+=("$1"); }
+add_if_exists "$CLAUDE_HOME/CLAUDE.md"
+dir=$SESSION_CWD
+while [ "$dir" != "/" ] && [ -n "$dir" ]; do
+  [ -f "$dir/CLAUDE.md" ] && STATIC_FILES+=("$dir/CLAUDE.md")
+  dir=$(dirname "$dir")
+done
+MEM_DIR=$(memory_project_dir "$SESSION_CWD")
+MEM_INDEX="$MEM_DIR/MEMORY.md"
+add_if_exists "$MEM_INDEX"
+# Topic memory files are NOT statically injected — the harness loads only the
+# MEMORY.md index; topic files enter context on demand when Read. Summarize
+# them separately instead of miscounting them as static.
+MEM_TOPIC_COUNT=0; MEM_TOPIC_CHARS=0
+for _mf in "$MEM_DIR"/*.md; do
+  [ -f "$_mf" ] || continue
+  [ "$(basename "$_mf")" = "MEMORY.md" ] && continue
+  MEM_TOPIC_COUNT=$((MEM_TOPIC_COUNT + 1))
+  MEM_TOPIC_CHARS=$((MEM_TOPIC_CHARS + $(wc -c <"$_mf" 2>/dev/null | tr -d ' ')))
+done
+
+# Files Read during the session
+declare -A READ_FILES
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  case "$path" in /*) ;; *) continue ;; esac
+  chars=$(jq -r --arg p "$path" '
+    select(.message.content) |
+    .message.content[]? |
+    select(.type=="tool_result") |
+    .content // "" |
+    if type=="array" then map(.text // "") | join("") else tostring end
+  ' "$TRANSCRIPT" 2>/dev/null | awk 'BEGIN{n=0} {n+=length($0)} END{print n}')
+  prev=${READ_FILES[$path]:-0}
+  [ "${chars:-0}" -gt "$prev" ] && READ_FILES[$path]=${chars:-0}
+done < <(jq -r '
+  select(.message.content) |
+  .message.content[]? |
+  select(.type=="tool_use" and .name=="Read") |
+  .input.file_path // empty
+' "$TRANSCRIPT" 2>/dev/null | sort -u)
+
+declare -a ROWS
+for f in "${STATIC_FILES[@]:-}"; do
+  [ -z "$f" ] && continue
+  chars=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  tok=$(chars_to_tokens "$chars")
+  ROWS+=("$tok|static|$f")
+done
+for f in "${!READ_FILES[@]}"; do
+  tok=$(chars_to_tokens "${READ_FILES[$f]}")
+  ROWS+=("$tok|read|$f")
+done
+
+if [ "${#ROWS[@]}" -eq 0 ]; then
+  SORTED=()
+else
+  IFS=$'\n' SORTED=($(printf "%s\n" "${ROWS[@]}" | sort -t'|' -k1,1 -rn))
+  unset IFS
+fi
+
+if [ "$OUTPUT_JSON" = 1 ]; then
+  printf '{"transcript":"%s","cwd":"%s","total_tokens":%s,"ctx_max":%s,"files":[' "$TRANSCRIPT" "$SESSION_CWD" "$TOTAL" "$CTX_MAX"
+  first=1
+  for row in "${SORTED[@]:-}"; do
+    [ -z "$row" ] && continue
+    tok=${row%%|*}; rest=${row#*|}; cat=${rest%%|*}; path=${rest#*|}
+    [ "$first" = 1 ] || printf ","
+    printf '{"tokens":%s,"category":"%s","path":"%s"}' "$tok" "$cat" "$path"
+    first=0
+  done
+  printf ']}\n'
+  exit 0
+fi
+
+echo
+c bold "Session: "; echo "$(basename "$TRANSCRIPT" .jsonl | cut -c1-8)  ($SESSION_CWD)"
+echo
+c bold "Files loaded into context:"
+echo
+printf "  %-7s %-7s  %s\n" "TOKENS" "TYPE" "PATH"
+printf "  %-7s %-7s  %s\n" "------" "----" "----"
+
+static_sum=0; read_sum=0
+for row in "${SORTED[@]:-}"; do
+  [ -z "$row" ] && continue
+  tok=${row%%|*}; rest=${row#*|}; cat=${rest%%|*}; path=${rest#*|}
+  color=$(tok_color "$tok")
+  tok_str=$(fmt_tok "$tok")
+  disp=${path/#$HOME/\~}
+  printf "  "
+  c "$color" "$(printf '%-7s' "$tok_str")"
+  printf " "
+  if [ "$cat" = "static" ]; then
+    c dim "$(printf '%-7s' "static")"
+    static_sum=$((static_sum + tok))
+  else
+    c cyan "$(printf '%-7s' "read")"
+    read_sum=$((read_sum + tok))
+  fi
+  printf "  %s\n" "$disp"
+done
+
+if [ "${MEM_TOPIC_COUNT:-0}" -gt 0 ]; then
+  c dim "  (+ ${MEM_TOPIC_COUNT} topic memory files, ${MEM_TOPIC_CHARS} chars on disk — loaded on demand when Read, not in static context)"
+  echo
+fi
+
+# The prune hint used to live in the skill's SKILL.md as "if the inspection shows
+# >=10 auto-memory files, suggest --prune" — a fixed threshold test that needed no
+# model to evaluate. Emitting it here makes the advice unmissable and identical every
+# run, and lets the skill be a pure wrapper.
+PRUNE_HINT_MIN=${PRUNE_HINT_MIN:-10}
+if [ "${MEM_TOPIC_COUNT:-0}" -ge "$PRUNE_HINT_MIN" ]; then
+  c yellow "  ${MEM_TOPIC_COUNT} auto-memory files — run 'claude-loaded --prune' to flag stale ones"
+  c dim " (unmodified >=${STALE_DAYS:-60}d and unreferenced in any transcript for >=${RECENT_DAYS:-30}d)"
+  echo
+  echo
+fi
+
+echo
+sum_listed=$((static_sum + read_sum))
+
+if [ "$TOTAL" -gt 0 ]; then
+  overhead=$((TOTAL - sum_listed))
+  [ "$overhead" -lt 0 ] && overhead=0
+  # Color thresholds for the breakdown sums.
+  # Static is loaded EVERY turn forever — most expensive long-run; tightest thresholds.
+  # Read is per-session, less compounding; medium thresholds.
+  static_color=green
+  [ "$static_sum" -ge 5000  ] && static_color=yellow
+  [ "$static_sum" -ge 15000 ] && static_color=red
+  read_color=green
+  [ "$read_sum" -ge 10000 ] && read_color=yellow
+  [ "$read_sum" -ge 50000 ] && read_color=red
+  # Total: percentage of context window, with an absolute floor (anything ≥100K is yellow regardless)
+  pct=$(awk "BEGIN{printf \"%.1f\", $TOTAL*100/$CTX_MAX}")
+  pct_color=green
+  { [ "$TOTAL" -ge 100000 ] || awk "BEGIN{exit !($TOTAL*100/$CTX_MAX >= 25)}"; } && pct_color=yellow
+  { [ "$TOTAL" -ge 300000 ] || awk "BEGIN{exit !($TOTAL*100/$CTX_MAX >= 50)}"; } && pct_color=red
+
+  c bold "Breakdown (sums to total):"
+  echo
+  printf "  %-42s " "Files listed above (CLAUDE.md + memory):"
+  c "$static_color" "$(printf '%8s' "$(fmt_tok $static_sum)")"; echo
+  printf "  %-42s " "Files Read by tools this session:"
+  c "$read_color" "$(printf '%8s' "$(fmt_tok $read_sum)")"; echo
+  printf "  %-42s %8s\n" "Everything else (system + tools + conv):" "$(fmt_tok $overhead)"
+  printf "  %-42s %8s\n" "" "--------"
+  printf "  %-42s " "Total context:"
+  c "$pct_color" "$(printf '%8s' "$(fmt_tok $TOTAL)")"
+  printf " / %s  (%s%%)\n" "$(fmt_tok $CTX_MAX)" "$pct"
+  echo
+  c dim "  Sum thresholds — Static:  "; c green "<5K"; c dim "  "; c yellow "<15K"; c dim "  "; c red "≥15K"
+  echo
+  c dim "                    Read:    "; c green "<10K"; c dim "  "; c yellow "<50K"; c dim "  "; c red "≥50K"
+  echo
+  c dim "                    Total:   "; c green "<25%"; c dim "  "; c yellow "<50% or ≥100K"; c dim "  "; c red "≥50% or ≥300K"
+  echo
+  c dim "  \"Everything else\" = system prompt + tool schemas + conversation messages."
+  echo
+else
+  c bold "Files identified above:"
+  echo
+  printf "  %-42s %8s\n" "Static (CLAUDE.md + memory):" "$(fmt_tok $static_sum)"
+  printf "  %-42s %8s\n" "Read by tools this session:" "$(fmt_tok $read_sum)"
+  echo
+  c yellow "  Total context unknown — no assistant turn recorded yet in this session."
+  echo
+  c dim "  Re-run /loaded after the next response to see the full breakdown (system prompt + tool schemas + conversation are only measured when the API returns usage data)."
+  echo
+fi
+c dim "  Color per-file: "; c green "green"; c dim " <2K  "; c yellow "yellow"; c dim " <10K  "; c red "red"; c dim " ≥10K"
+echo

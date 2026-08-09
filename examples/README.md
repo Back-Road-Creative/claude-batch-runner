@@ -1,6 +1,6 @@
 # Examples
 
-Four things live here, in rough order of how useful they are when you're
+Five things live here, in rough order of how useful they are when you're
 starting out.
 
 ## 1. A runnable campaign
@@ -66,7 +66,27 @@ What's worth stealing from it:
 
 `--report-dir` controls where reports go (default `./health-reports`).
 
-## 4. Two workflow programs, for reading
+## 4. A standalone context inspector
+
+`claude-loaded/` — one bash script that prints which files are loaded into a
+Claude Code session's context, largest first, with a token estimate each.
+
+```bash
+examples/claude-loaded/claude-loaded              # the current session
+examples/claude-loaded/claude-loaded --budget     # only the always-loaded set
+```
+
+It is the odd one out here: it does not import `claude_batch_runner` and has
+nothing to do with campaigns. It is included because a batch of agent calls
+inherits whatever `CLAUDE.md` and auto-memory bloat the session already carries,
+and this is how you find that before paying for it on every unit.
+
+`--budget` is the automatable part — it needs no session, exits non-zero when
+the every-turn set is over a ceiling, and is meant for a `SessionStart` hook.
+See [`claude-loaded/README.md`](claude-loaded/README.md), which is also honest
+about what the script measures badly.
+
+## 5. Two workflow programs, for reading
 
 `workflows/tiered-wave.js` and `workflows/tiered-audit-loop.js`.
 
