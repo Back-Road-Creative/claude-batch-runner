@@ -313,6 +313,12 @@ as before.
   strategy agent for a verdict, and writes a report. It is the fullest example
   of the split this library is built around: code owns the loop, models own the
   judgement.
+- [`examples/claude-loaded/`](examples/claude-loaded/) — a standalone bash
+  script that lists the files loaded into a Claude Code session's context with a
+  token estimate each, and whose `--budget` mode exits non-zero when the
+  re-sent-every-turn set (`CLAUDE.md` chain plus auto-memory index) is too big.
+  It does not use this library; it is here because a campaign pays for that
+  bloat once per unit.
 - [`examples/workflows/`](examples/workflows/) — two JavaScript workflow
   programs showing the same tiered patterns. **They do not run standalone** —
   they expect an agent-workflow host that supplies `agent()`, `parallel()`,
