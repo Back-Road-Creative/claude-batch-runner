@@ -34,12 +34,15 @@ Breakdown (sums to total):
   Everything else (system + tools + conv):      31.0K
                                              --------
   Total context:                                52.5K / 200.0K  (26.3%)
+  Cost per turn (cache read @ $1.50/M):        $0.0788
 ```
 
 `static` rows are re-sent every turn. `read` rows entered the window once, when
 a tool read them. "Everything else" is the remainder after subtracting the
 listed files from the total the API actually reported — system prompt, tool
-schemas, and the conversation itself.
+schemas, and the conversation itself. The last line prices the steady state:
+every turn re-sends the whole window as a cache read, so that is the floor for
+one more turn at `COST_RATE_USD_M`.
 
 ## How it finds your session
 
@@ -64,7 +67,7 @@ If it can't resolve a session it prints the running-session list and exits `2`.
 | Flag | What it does |
 |---|---|
 | *(none)* | The breakdown above, for the current session. |
-| `--all` | List running Claude Code sessions: PID, cwd, session id. |
+| `--all` | List running Claude Code sessions: PID, start time, cwd, session id. |
 | `--session <id>` | Use this session id (prefix match). |
 | `--transcript <path>` | Use this transcript file directly. |
 | `--prune` | Report auto-memory files that look abandoned. |
@@ -130,7 +133,7 @@ distinctive filename is judged well and a generic one (`notes.md`) is not.
 | `STALE_DAYS` | `60` | `--prune`: unmodified-for-N-days threshold. |
 | `RECENT_DAYS` | `30` | `--prune`: unseen-in-transcripts-for-N-days threshold. |
 | `PRUNE_HINT_MIN` | `10` | Topic-memory count above which the default view suggests `--prune`. |
-| `COST_RATE_USD_M` | `1.50` | Read, but currently unused — see below. |
+| `COST_RATE_USD_M` | `1.50` | Per-1M-token cache-read price used for the cost line. Must be a number. |
 
 Without `CLAUDE_CTX_MAX` the window is inferred from the `model` in
 `~/.claude/settings.json`: a `[1m]` alias gets 1,000,000, anything else 200,000.
@@ -142,7 +145,7 @@ that is wrong for yours.
 | Code | Meaning |
 |---|---|
 | `0` | Ran. Under budget, in `--budget` mode. |
-| `1` | Over budget, or an unknown argument. |
+| `1` | Over budget, an unknown argument, or a non-numeric `COST_RATE_USD_M`. |
 | `2` | Could not resolve a session. |
 
 ## Requirements
@@ -157,17 +160,17 @@ Nothing here spawns `claude`, spends anything, or writes any file.
   produced by a tokenizer. Treat them as relative sizes for spotting the big
   rows, not as billing figures. The one exact number on the screen is "Total
   context", which comes from the last API response's own usage.
-- **The per-file number on `read` rows is not per-file.** The counting step
-  never narrows the transcript to the file it is pricing, so every `read` row
-  reports the same value — the total size of *all* tool output in the session —
-  and their sum is correspondingly inflated. Which files were read is right;
-  how big each one was is not. Static rows are measured on disk and are
-  unaffected, as are `--budget` and `--prune`.
+- **A `read` row measures the tool result, not the file on disk.** The size
+  comes from the `tool_result` the `Read` returned, which is what actually
+  entered the window — line-number prefixes and any appended notice included —
+  so it runs a little over the file's own byte count. A partial read (`offset` /
+  `limit`) is measured as the slice that was returned, and a file read more than
+  once is counted at its largest single result rather than the sum, on the
+  assumption that the re-read covered the same ground.
 - **Only the `Read` tool counts.** Output from Grep, Glob, Bash, and everything
   else lands in "Everything else" rather than getting a row.
-- **No cost figure is printed, despite `--help`.** The usage text advertises a
-  "cost per turn" and a `COST_RATE_USD_M` rate to compute it with. The formatter
-  exists in the script but nothing calls it, so setting the variable changes no
-  output. Read the help line as a plan, not a feature.
-- **`--all` prints `startedAt` as stored.** When the harness writes it as a
-  number rather than a timestamp, that column shows the raw number.
+- **The cost line is an estimate at one rate you supply.** It assumes the whole
+  window is billed as a cache read every turn and multiplies by
+  `COST_RATE_USD_M`, whose `1.50` default is an Opus-class figure that will go
+  stale. It is not a bill, and it does not know about output tokens, cache
+  writes, or your plan.

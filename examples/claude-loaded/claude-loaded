@@ -45,6 +45,10 @@ FORCE_SESSION=""
 
 die() { echo "claude-loaded: $*" >&2; exit 1; }
 
+# RATE is interpolated into an awk program (fmt_cost), so a non-numeric value is
+# an awk syntax error at best and injected awk code at worst.
+case "$RATE" in ''|.|*[!0-9.]*|*.*.*) die "COST_RATE_USD_M must be a number: $RATE" ;; esac
+
 c() {
   [ "$USE_COLOR" = 0 ] && { printf "%s" "$2"; return; }
   case "$1" in
@@ -139,7 +143,15 @@ list_sessions() {
     pid=$(jq -r '.pid // empty' "$sf")
     [ -d "/proc/$pid" ] || continue
     cwd=$(jq -r '.cwd // empty' "$sf")
-    started=$(jq -r '.startedAt // empty' "$sf" | cut -dT -f2 | cut -d. -f1)
+    # startedAt is written either as an ISO-8601 string or as epoch milliseconds;
+    # slicing on "T" is a no-op on the number and printed it raw.
+    started=$(jq -r '.startedAt // empty' "$sf")
+    case "$started" in
+      '')       ;;
+      *[!0-9]*) started=${started#*T}; started=${started%%.*}; started=${started%Z} ;;
+      *)        [ "${#started}" -ge 12 ] && started=$((started / 1000))
+                started=$(date -d "@$started" +%H:%M:%S 2>/dev/null || echo "$started") ;;
+    esac
     sid=$(jq -r '.sessionId // empty' "$sf")
     printf "%-8s %-10s %-50s %s\n" "$pid" "$started" "${cwd:0:50}" "${sid:0:8}"
   done
@@ -385,26 +397,48 @@ for _mf in "$MEM_DIR"/*.md; do
   MEM_TOPIC_CHARS=$((MEM_TOPIC_CHARS + $(wc -c <"$_mf" 2>/dev/null | tr -d ' ')))
 done
 
-# Files Read during the session
+# Files Read during the session.
+#
+# WHY the two-pass join: a tool_result carries only its tool_use_id, never the
+# path it came from. The path lives in the matching tool_use block of the
+# preceding assistant message. Pass 1 maps id -> path for Read calls, pass 2
+# maps id -> result size, and awk joins them, keeping the largest result per
+# path (a file read twice is in context once). Sizing a path by re-scanning
+# every tool_result instead — with no filter tying results to that path —
+# charged EVERY path the total of ALL tool output in the session, so every read
+# row printed the same inflated number and their sum overshot the real total.
 declare -A READ_FILES
-while IFS= read -r path; do
+while IFS=$'\t' read -r path chars; do
   [ -z "$path" ] && continue
   case "$path" in /*) ;; *) continue ;; esac
-  chars=$(jq -r --arg p "$path" '
-    select(.message.content) |
-    .message.content[]? |
-    select(.type=="tool_result") |
-    .content // "" |
-    if type=="array" then map(.text // "") | join("") else tostring end
-  ' "$TRANSCRIPT" 2>/dev/null | awk 'BEGIN{n=0} {n+=length($0)} END{print n}')
-  prev=${READ_FILES[$path]:-0}
-  [ "${chars:-0}" -gt "$prev" ] && READ_FILES[$path]=${chars:-0}
-done < <(jq -r '
-  select(.message.content) |
-  .message.content[]? |
-  select(.type=="tool_use" and .name=="Read") |
-  .input.file_path // empty
-' "$TRANSCRIPT" 2>/dev/null | sort -u)
+  READ_FILES[$path]=${chars:-0}
+done < <(
+  {
+    jq -r '
+      select(.message.content) |
+      .message.content[]? |
+      select(.type=="tool_use" and .name=="Read") |
+      select(.input.file_path != null) |
+      "U\t" + .id + "\t" + (.input.file_path | tostring)
+    ' "$TRANSCRIPT" 2>/dev/null
+    jq -r '
+      select(.message.content) |
+      .message.content[]? |
+      select(.type=="tool_result") |
+      "R\t" + .tool_use_id + "\t" + (
+        (.content // "") |
+        (if type=="array" then map(.text // "") | join("") else tostring end) |
+        length | tostring
+      )
+    ' "$TRANSCRIPT" 2>/dev/null
+  } | awk -F'\t' '
+      $1=="U" { id2path[$2]=$3; if (!($3 in best)) best[$3]=0; next }
+      $1=="R" && ($2 in id2path) {
+        p=id2path[$2]; if ($3+0 > best[p]) best[p]=$3+0; next
+      }
+      END { for (p in best) printf "%s\t%d\n", p, best[p] }
+    '
+)
 
 declare -a ROWS
 for f in "${STATIC_FILES[@]:-}"; do
@@ -516,6 +550,10 @@ if [ "$TOTAL" -gt 0 ]; then
   printf "  %-42s " "Total context:"
   c "$pct_color" "$(printf '%8s' "$(fmt_tok $TOTAL)")"
   printf " / %s  (%s%%)\n" "$(fmt_tok $CTX_MAX)" "$pct"
+  # Steady state: the whole window is re-sent as a cache read every turn, so the
+  # per-turn floor is TOTAL at the cache-read rate. An estimate at the configured
+  # rate, not a bill — set COST_RATE_USD_M when your model prices differently.
+  printf "  %-42s %8s\n" "Cost per turn (cache read @ \$$RATE/M):" "$(fmt_cost "$TOTAL")"
   echo
   c dim "  Sum thresholds — Static:  "; c green "<5K"; c dim "  "; c yellow "<15K"; c dim "  "; c red "≥15K"
   echo

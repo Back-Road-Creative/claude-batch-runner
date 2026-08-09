@@ -22,13 +22,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`examples/claude-loaded/`** — a standalone bash context inspector. It lists
   the files loaded into a Claude Code session (the `CLAUDE.md` chain, the
   auto-memory index, and every file a `Read` pulled in) with a per-file token
-  estimate, and its `--budget` mode checks just the re-sent-every-turn set
-  against a ceiling with no session or transcript needed, so it can run from a
-  `SessionStart` hook. It does not import `claude_batch_runner`. Its README
-  documents the three things it reports badly: `read` rows all carry the same
-  (whole-session) size rather than a per-file one, token counts are a
-  3.6-chars-each estimate, and the "cost per turn" its `--help` advertises is
-  never printed.
+  estimate and a steady-state cost per turn, and its `--budget` mode checks just
+  the re-sent-every-turn set against a ceiling with no session or transcript
+  needed, so it can run from a `SessionStart` hook. It does not import
+  `claude_batch_runner`. A `read` row is sized by joining each `tool_result`
+  back to the `tool_use` that requested it, so the number is that file's own;
+  the README is explicit that it measures the tool result rather than the file
+  on disk, that token counts are a 3.6-chars-each estimate rather than a
+  tokenizer's, and that the cost line is an estimate at a rate you supply.
 - **`cwd` and `permission_mode` on `call_agent`** — two optional keyword-only
   arguments. `cwd` runs the `claude` subprocess in that directory, validated to
   exist first so an unusable path raises `AgentError` before a process starts
