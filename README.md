@@ -301,6 +301,21 @@ Both default to `None`, and omitting them changes nothing: no
 injected `call=` written against the four-argument signature is invoked exactly
 as before.
 
+### Timeouts and cleanup
+
+Each `claude` call is bounded by `AGENT_TIMEOUT_S` (default 600). On POSIX
+systems (Linux, macOS) the CLI runs in its own session, so a timeout stops the
+whole process tree, not just the CLI: `SIGTERM` to the process group, up to
+`AGENT_TERM_GRACE_S` (default 5) seconds of grace, then `SIGKILL` for anything
+left. The same happens when the wait is interrupted, and `fan_out` does it for
+every call still running when it is interrupted (Ctrl-C). The `AgentError` for
+a timeout quotes the tail of what the process had printed and keeps all of it
+on `.stdout` / `.stderr`. A call that finishes normally is not touched.
+
+Limits: a descendant that starts its own session or process group is outside
+the group and is not stopped. On Windows there are no POSIX process groups, so
+only the direct child is killed.
+
 ## Examples
 
 - [`examples/demo-campaign.json`](examples/) — the campaign above, runnable

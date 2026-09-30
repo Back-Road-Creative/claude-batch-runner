@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A timed-out `claude` call left its descendants running.** `call_agent`
+  killed only the direct child, so anything the CLI had spawned kept running
+  (and holding its pipes) after the call was reported as timed out. On POSIX the
+  CLI now runs in its own session; a timeout, an interrupted wait, or an
+  interrupted `fan_out` sends `SIGTERM` to the whole process group and then
+  `SIGKILL` after `AGENT_TERM_GRACE_S` (default 5s). The timeout `AgentError`
+  now carries the partial stdout/stderr. Windows still kills only the direct
+  child. Normal completion is unchanged.
 - **`__version__` reported `0.1.0` for the whole of `0.1.1`.** The release
   bumped the literal in `pyproject.toml` and left the second one in
   `claude_batch_runner/__init__.py` behind, so anything reading the package
