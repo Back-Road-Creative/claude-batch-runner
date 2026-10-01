@@ -207,7 +207,13 @@ re-invoked with the failed criteria attached and gets `max_revisions` attempts
 dropped and nothing auto-passes.
 
 Everything the grader reads is wrapped in a data-only frame, so a unit's own
-text can't act as instructions to the grader.
+text can't act as instructions to the grader. The opening and closing lines of
+each frame carry the same random id (`=== END WORKER OUTPUT CONTENT id=3f9a1c2e ===`),
+drawn fresh per frame, so a unit that quotes a closing line stays inside the
+frame. That is a marking convention, not a security boundary: the grader still
+treats framed text as untrusted. Grader output that is not a valid `grades` list
+(unknown verdict, blank evidence, non-string or duplicate criterion id, missing
+criterion) is rejected, never counted as a pass.
 
 ## The report
 

@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Data-only frames used a fixed closing delimiter, and a duplicated grade could
+  hide a FAIL.** `verify.frame` now puts the same random per-frame id on the
+  opening and closing lines (redrawn if content forges the close), so content
+  holding the old `=== END ... ===` line stays data. Grade validation now rejects
+  non-string and duplicate criterion ids with a `VerifyError` instead of raising
+  `TypeError` or letting a later entry overwrite an earlier verdict.
 - **`__version__` reported `0.1.0` for the whole of `0.1.1`.** The release
   bumped the literal in `pyproject.toml` and left the second one in
   `claude_batch_runner/__init__.py` behind, so anything reading the package
